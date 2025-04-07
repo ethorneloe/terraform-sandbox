@@ -1,0 +1,4 @@
+resource_group_name  = "rg-automation-test"
+storage_account_name = "iiautomationtfstatetest"
+container_name       = "ii-terraform-runbooks-test"
+key                  = "ii-terraform-runbooks-test.tfstate"

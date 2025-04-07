@@ -1,0 +1,177 @@
+# Purpose:
+#   - To automate and standardize Terraform plan and analysis operations across multiple environments.
+#   - Support optional security analysis and optional encryption of Terraform plans for added security.
+#
+# Main Steps:
+#   1. Checkout Repository.
+#   2. Setup Terraform:
+#       - Installs the default or specified version of Terraform to ensure version consistency.
+#   3. Configure Git Access:
+#       - Sets up Git to access private Terraform modules using a fine-grained PAT. Ideally later on this will be replaced with a GitHub App.
+#   4. Initialize Terraform:
+#       - Runs terraform init with the provided backend configuration to prepare the working directory.
+#   5. Terraform Validate:
+#       - Validates the Terraform configuration files for syntax and internal consistency.
+#   6. Terraform fmt:
+#       - Checks the formatting of Terraform files to ensure they comply with standards.
+#   7. Run Microsoft Security DevOps Analysis (Optional):
+#       - Executes security analysis tools if enabled.
+#   8. Upload Alerts to Security Tab (Optional):
+#       - Uploads security analysis results to the GitHub Security tab.
+#   9. Terraform Plan:
+#       - Generates a Terraform execution plan, optionally using variables files.
+#  10. Install SOPS (Optional):
+#       - Installs Mozilla SOPS if a configuration file is provided for encrypting the plan.
+#  11. Encrypt Plan Files (Optional):
+#       - Encrypts the Terraform plan files using SOPS if applicable.
+#  12. Upload Plan Files:
+#       - Uploads the Terraform plan files, encrypted or unencrypted based on the presence of a SOPS configuration file.
+#
+# Prerequisites:
+#   - GitHub Secrets for Azure credentials and module repo access token are properly configured.
+#   - Terraform configurations and backend settings exist in the specified working directory.
+#   - (Optional) A SOPS configuration file is available if encrypted plans are used.
+#
+# Usage:
+#   - Invoke this workflow using workflow_call from another workflow.
+#   - Ensure all required inputs are provided when triggering this workflow.
+#   - Adjust the optional inputs as needed for your specific use case.
+
+name: Terraform Analyze and Plan
+
+permissions:
+  id-token: write        # Needed for OIDC authentication
+  contents: read         # Needed for the checkout action
+  actions: read          # Needed for the upload-sarif action
+  security-events: write # Needed for the upload-sarif action
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment"
+        required: true
+        type: string
+      plan_filename:
+        description: "Name of the Terraform plan file"
+        required: true
+        type: string
+      working_directory:
+        description: "Working directory for Terraform configurations"
+        required: true
+        type: string
+      terraform_version:
+        description: "Version of Terraform to use"
+        required: false
+        type: string
+        default: ""
+      sops_config_file:
+        description: "Name of the SOPS configuration file"
+        required: false
+        type: string
+        default: ""
+      enable_security_analysis:
+        description: "Toggle the security analysis step"
+        required: true
+        type: boolean
+      artifact_basename:
+        required: true
+        type: string
+      tfbackend_filepath:
+        description: "Path to the Terraform backend configuration file"
+        required: true
+        type: string
+      tfvars_filepath:
+        description: "Name of the Terraform variables file"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  analyze-and-plan:
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_USE_OIDC: true
+      ARM_USE_AZUREAD: true # Needed for using OIDC to access the Azure storage account backend
+      TF_LOG: ${{ secrets.TF_LOG_LEVEL }}
+      TF_VAR_owner_ids: ${{ vars.OWNER_IDS }}
+
+    runs-on: ubuntu-latest
+
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform (Default Version)
+        if : ${{ inputs.terraform_version == '' }}
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Setup Terraform (Specific Version)
+        if : ${{ inputs.terraform_version != '' }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+
+      # Run plan with tfvars file if provided otherwise run without
+      - name: Terraform Plan
+        run: |
+          if [ -n "${{ inputs.tfvars_filepath }}" ]; then
+            terraform plan -input=false -out="${{ inputs.plan_filename }}" -var-file="${{ inputs.tfvars_filepath }}" -no-color > "${{ inputs.plan_filename }}.txt"
+          else
+            terraform plan -input=false -out="${{ inputs.plan_filename }}" -no-color > "${{ inputs.plan_filename }}.txt"
+          fi
+
+      # Install SOPS if a configuration file exists for encryption of the Terraform plan
+      - name: Install SOPS
+        if: ${{ inputs.sops_config_file != '' }}
+        uses: mdgreenwald/mozilla-sops-action@v1.6.0
+
+      # Encrypt the Terraform plan files if a SOPS configuration file is provided
+      - name: Encrypt Plan Files
+        if: ${{ inputs.sops_config_file != '' }}
+        run: |
+          sops --config ${{ inputs.sops_config_file }} --encrypt "${{ inputs.working_directory }}/${{ inputs.plan_filename }}" > "${{ inputs.working_directory }}/${{ inputs.plan_filename }}.enc"
+          sops --config ${{ inputs.sops_config_file }} --encrypt "${{ inputs.working_directory }}/${{ inputs.plan_filename }}.txt" > "${{ inputs.working_directory }}/${{ inputs.plan_filename }}.txt.enc"
+
+      # Upload the encrypted plan file if a SOPS configuration file is provided
+      - name: Upload Encrypted Plan
+        if: ${{ inputs.sops_config_file != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_basename }}-enc
+          path: ${{ inputs.working_directory }}/${{ inputs.plan_filename }}.enc
+
+      # Upload the encrypted plan file (Human Readable Version) if a SOPS configuration file is provided
+      - name: Upload Encrypted Plan (Human Readable Version)
+        if: ${{ inputs.sops_config_file != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_basename }}-txt-enc
+          path: ${{ inputs.working_directory }}/${{ inputs.plan_filename }}.txt.enc
+
+      # Upload the unencrypted plan file if no SOPS configuration file is provided
+      - name: Upload Plan Files
+        if: ${{ inputs.sops_config_file == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_basename }}
+          path: ${{ inputs.working_directory }}/${{ inputs.plan_filename }}
+
+      # Upload the unencrypted plan file (Human Readable Version) if no SOPS configuration file is provided
+      - name: Upload Plan Text Files
+        if: ${{ inputs.sops_config_file == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_basename }}-txt
+          path: ${{ inputs.working_directory }}/${{ inputs.plan_filename }}.txt

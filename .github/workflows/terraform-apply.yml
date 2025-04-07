@@ -1,0 +1,149 @@
+# Purpose:
+#   - To simplify and standardize terraform apply operations across multiple environments.
+#   - Support both encrypted and unencrypted Terraform plans for added security if required.
+#
+# Main Steps:
+#   1. Checkout Repository:
+#       - Clones the repository to access the necessary Terraform configuration files.
+#   2. Setup Terraform:
+#       - Installs the specified version of Terraform to ensure version consistency.
+#   3. Configure Git Access:
+#       - Sets up Git to access private Terraform modules using a secure OAuth token.
+#   4. Initialize Terraform:
+#       - Runs terraform init with the provided backend configuration to prepare the working directory.
+#   5. Install SOPS (Optional):
+#       - Installs Mozilla SOPS if a configuration file is provided for decrypting encrypted Terraform plans.
+#   6. Download Terraform Plan:
+#       - Downloads the Terraform plan artifact, choosing between encrypted or unencrypted based on the presence of a SOPS configuration file.
+#   7. Decrypt Terraform Plan (Optional):
+#       - Decrypts the encrypted Terraform plan using SOPS if applicable.
+#   8. Apply Terraform Plan:
+#       - Executes terraform apply with the plan file to deploy the infrastructure changes.
+#
+# Prerequisites:
+#   - GitHub Secrets for Azure credentials and module repo access token are properly configured.
+#   - Terraform configurations and backend settings exist in the specified working directory.
+#   - (Optional) A SOPS configuration file is available if encrypted plans are used.
+#
+# Usage:
+#   - Invoke this workflow using workflow_call from another workflow.
+#   - Ensure all required inputs are provided when triggering this workflow.
+#   - Adjust the optional inputs as needed for your specific use case.
+
+name: Terraform Apply
+
+permissions:
+  id-token: write        # Needed for OIDC authentication
+  contents: read         # Needed for the checkout action
+  actions: read          # Needed for the upload-sarif action
+  security-events: write # Needed for the upload-sarif action
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment"
+        required: true
+        type: string
+      plan_filename:
+        description: "Name of the Terraform plan file"
+        required: true
+        type: string
+      working_directory:
+        description: "Working directory for Terraform configurations"
+        required: true
+        type: string
+      terraform_version:
+        description: "Version of Terraform to use"
+        required: false
+        type: string
+        default: ""
+      sops_config_file:
+        description: "Name of the SOPS configuration file"
+        required: false
+        type: string
+        default: ""
+      artifact_basename:
+        required: true
+        type: string
+      tfbackend_filepath:
+        description: "Path to the Terraform backend configuration file"
+        required: true
+        type: string
+      tfvars_filepath:
+        description: "Name of the Terraform variables file"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  apply:
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_USE_OIDC: true
+      ARM_USE_AZUREAD: true # Needed for using OIDC to access the Azure storage account backend
+      TF_LOG: ${{ secrets.TF_LOG_LEVEL }}
+      TF_VAR_owner_upns: ${{ vars.OWNER_UPNS }}
+
+    runs-on: ubuntu-latest
+
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      # Configure PAT to access private Terraform modules
+      - name: Configure Git Access
+        id: gitconfig
+        run: git config --global url."https://oauth2:${{ secrets.II_TERRAFORM_MODULES_TOKEN }}@github.com".insteadOf https://github.com
+
+      - name: Terraform Init
+        run: |
+          terraform init -input=false -backend-config=${{ inputs.tfbackend_filepath }}
+
+      # Install SOPS if a configuration file exists for decryption of a previously encrypted Terraform plan
+      - name: Install SOPS
+        if: ${{ inputs.sops_config_file }}
+        uses: mdgreenwald/mozilla-sops-action@v1.6.0
+        id: install
+
+      # Download the encrypted plan file if a SOPS configuration file is provided
+      - name: Download Terraform plan (Encrypted)
+        if: ${{ inputs.sops_config_file }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_basename }}-enc
+          path: ${{ inputs.working_directory }}
+
+      # Download the unencrypted plan file if no SOPS configuration file is provided
+      - name: Download Terraform plan (Unencrypted)
+        if: ${{ inputs.sops_config_file == ''}}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_basename }}
+          path: ${{ inputs.working_directory }}
+
+      # Decrypt the Terraform plan file if a SOPS configuration file is provided
+      - name: Decrypt Terraform Plan File
+        if: ${{ inputs.sops_config_file }}
+        run: |
+          sops --config ${{ inputs.sops_config_file }} --decrypt ${{ inputs.working_directory }}/${{ inputs.plan_filename }}.enc > ${{ inputs.working_directory }}/${{ inputs.plan_filename }}
+
+      # Apply the Terraform plan, using the decrypted or directly downloaded file
+      - name: Apply Terraform Plan
+        run: |
+          terraform apply -input=false -auto-approve ${{ inputs.plan_filename }}
