@@ -106,11 +106,6 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
 
-      # Configure PAT to access private Terraform modules
-      - name: Configure Git Access
-        id: gitconfig
-        run: git config --global url."https://oauth2:${{ secrets.II_TERRAFORM_MODULES_TOKEN }}@github.com".insteadOf https://github.com
-
       - name: Terraform Init
         run: |
           terraform init -input=false -backend-config=${{ inputs.tfbackend_filepath }}
