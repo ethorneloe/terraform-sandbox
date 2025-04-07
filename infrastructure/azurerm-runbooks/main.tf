@@ -12,3 +12,4 @@ resource "azuread_service_principal" "my_sp" {
 
   owners = var.owner_ids
 }
+
