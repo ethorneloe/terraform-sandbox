@@ -4,7 +4,7 @@ resource "azuread_application" "my_app" {
   display_name = "MySampleApp2"
 
   # Assign owners (the SP running Terraform, for example)
-  owners = [data.azuread_client_config.current.object_id]
+  owners = var.owner_ids
 }
 
 resource "azuread_service_principal" "my_sp" {
@@ -12,4 +12,3 @@ resource "azuread_service_principal" "my_sp" {
 
   owners = var.owner_ids
 }
-
