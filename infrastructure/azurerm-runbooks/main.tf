@@ -45,7 +45,7 @@ resource "azuread_application" "my_app" {
 ###########################################################
 resource "azuread_service_principal" "my_sp" {
   # If you’re using AzureAD provider v2.x, use 'application_id' instead of 'client_id':
-  client_id = azuread_application.my_app.application_id
+  client_id = azuread_application.my_app.client_id
 
   owners = [
     data.azuread_client_config.current.object_id,
